@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListView,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
@@ -21,9 +22,11 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSlider,
+    QTreeView,
     QVBoxLayout,
     QWidget,
     QSizePolicy,
+    QAbstractItemView,
 )
 
 
@@ -266,30 +269,86 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def on_add_folder_clicked(self) -> None:
-        if len(self.folder_players) >= MAX_FOLDERS:
+        remaining = MAX_FOLDERS - len(self.folder_players)
+        if remaining <= 0:
             QMessageBox.warning(self, "提示", f"最多只能添加 {MAX_FOLDERS} 个文件夹。")
             return
 
-        path_str = QFileDialog.getExistingDirectory(self, "选择包含 mp4 和 prompts.csv 的文件夹")
-        if not path_str:
+        dialog = QFileDialog(self, "选择包含 mp4 和 prompts.csv 的文件夹（可多选同一目录下多个文件夹）")
+        dialog.setFileMode(QFileDialog.Directory)
+        dialog.setOption(QFileDialog.DontUseNativeDialog, True)
+        dialog.setOption(QFileDialog.ShowDirsOnly, True)
+
+        # 使用延迟初始化：对话框真正显示后再找到内部视图并开启多选
+        def init_views() -> None:
+            views_local = dialog.findChildren(QListView) + dialog.findChildren(QTreeView)
+            for v in views_local:
+                v.setSelectionMode(QAbstractItemView.ExtendedSelection)
+
+        QTimer.singleShot(0, init_views)
+
+        # 当用户双击进入某个子文件夹（目录变化）时，清空当前选择，避免误把“刚进入的文件夹”当成已选路径
+        def clear_selection_on_dir_change(*_args) -> None:
+            views_local = dialog.findChildren(QListView) + dialog.findChildren(QTreeView)
+            for v in views_local:
+                v.clearSelection()
+                v.setSelectionMode(QAbstractItemView.ExtendedSelection)
+
+        try:
+            dialog.directoryEntered.connect(clear_selection_on_dir_change)
+        except Exception:
+            # 若绑定失败就忽略，此时行为退化为原来的逻辑
+            pass
+
+        if dialog.exec() != QFileDialog.Accepted:
             return
 
-        folder = Path(path_str)
-        if not folder.exists():
+        paths = dialog.selectedFiles()
+        if not paths:
             return
 
-        if any(p.folder == folder for p in self.folder_players):
-            QMessageBox.information(self, "提示", "该文件夹已经添加过了。")
-            return
+        added = 0
+        for path_str in paths:
+            if remaining <= 0:
+                break
 
-        self.add_folder(folder)
+            folder = Path(path_str)
+            if not folder.exists():
+                continue
+
+            if any(p.folder == folder for p in self.folder_players):
+                continue
+
+            self.add_folder(folder)
+            remaining -= 1
+            added += 1
+
+        if added == 0:
+            QMessageBox.information(self, "提示", "没有新的文件夹被添加（可能都已存在或无效）。")
 
     def add_folder(self, folder: Path) -> None:
         player = FolderVideoPlayer(folder, self)
         self.folder_players.append(player)
 
-        item = QListWidgetItem(str(folder))
+        # 左侧列表：每一行一个“路径 + 删除按钮”的小部件
+        item = QListWidgetItem()
         self.folder_list.addItem(item)
+
+        row_widget = QWidget(self)
+        row_layout = QHBoxLayout(row_widget)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+
+        btn_remove = QPushButton("❌️", row_widget)
+        btn_remove.setMaximumWidth(30)
+        btn_remove.clicked.connect(lambda _=False, f=folder: self.on_remove_folder_button_clicked(f))
+        row_layout.addWidget(btn_remove)
+
+        path_label = QLabel(str(folder), row_widget)
+        row_layout.addWidget(path_label)
+        row_layout.addStretch(1)
+
+        item.setSizeHint(row_widget.sizeHint())
+        self.folder_list.setItemWidget(item, row_widget)
 
         # 将视频控件加到网格布局：一行最多两个，超出换行
         index = len(self.folder_players) - 1
@@ -303,8 +362,69 @@ class MainWindow(QMainWindow):
         vbox.addWidget(player.video_widget)
         vbox.addWidget(player.info_label)
         container.setMinimumHeight(220)
+        # 记住对应的容器，方便单独删除和重新布局
+        player.container_widget = container
 
         self.video_grid.addWidget(container, row, col)
+
+    @Slot()
+    def on_remove_folder_button_clicked(self, folder: Path) -> None:
+        """左侧列表中某一行的删除按钮被点击。"""
+        self.remove_folder(folder)
+
+    def remove_folder(self, folder: Path) -> None:
+        # 找到对应的 FolderVideoPlayer 索引
+        idx = -1
+        for i, fp in enumerate(self.folder_players):
+            if fp.folder == folder:
+                idx = i
+                break
+
+        if idx == -1:
+            return
+
+        fp = self.folder_players.pop(idx)
+
+        # 从左侧列表移除对应行
+        item = self.folder_list.takeItem(idx)
+        if item is not None:
+            del item
+
+        # 从网格布局中移除对应视频容器
+        container = getattr(fp, "container_widget", None)
+        if container is not None:
+            self.video_grid.removeWidget(container)
+            container.setParent(None)
+
+        # 若被删除的是当前 master，对播放控制做相应处理
+        if self.master_player is fp.player:
+            self.master_player = None
+            self.position_slider.setEnabled(False)
+            self.btn_play_pause.setEnabled(False)
+            self.time_label.setText("00:00 / 00:00")
+
+            # 尝试用剩余的任意一个已加载视频作为新的 master
+            for other in self.folder_players:
+                if not other.player.source().isEmpty():
+                    self.set_master_player(other.player)
+                    self.btn_play_pause.setEnabled(True)
+                    self.position_slider.setEnabled(True)
+                    break
+
+        # 重新根据顺序布局剩余的容器（保持每行最多两个）
+        # 先从布局中取出所有项
+        while self.video_grid.count():
+            item = self.video_grid.takeAt(0)
+            # 不修改 widget 的 parent，容器还挂在 video_container 上
+
+        cols = 2
+        for i, other in enumerate(self.folder_players):
+            other_container = getattr(other, "container_widget", None)
+            if other_container is None:
+                continue
+            row = i // cols
+            col = i % cols
+            self.video_grid.addWidget(other_container, row, col)
 
     @Slot()
     def on_clear_folders_clicked(self) -> None:
