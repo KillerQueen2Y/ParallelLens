@@ -1,0 +1,12 @@
+[project]
+name = "multi-folder-video-viewer"
+version = "0.1.0"
+description = "Multi-folder synchronized MP4 viewer with prompts.csv support"
+readme = "README.md"
+requires-python = ">=3.9"
+
+# PEP 621 风格，uv 需要把依赖写成列表
+dependencies = ["PySide6"]
+
+[tool.uv]
+# 允许使用 uv 作为项目管理工具
