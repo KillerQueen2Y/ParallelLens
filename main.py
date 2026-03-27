@@ -19,9 +19,11 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSlider,
     QVBoxLayout,
     QWidget,
+    QSizePolicy,
 )
 
 
@@ -33,10 +35,13 @@ class FolderVideoPlayer:
 
     def __init__(self, folder: Path, parent: QWidget | None = None) -> None:
         self.folder = folder
-        self.prompts: Dict[int, str] = {}
-        self._load_prompts()
+        # 不再使用 prompts.csv 中的文案
+        # self.prompts: Dict[int, str] = {}
+        # self._load_prompts()
 
         self.video_widget = QVideoWidget(parent)
+        self.video_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.video_widget.setMinimumHeight(180)
 
         self.player = QMediaPlayer(parent)
         self.audio_output = QAudioOutput(parent)
@@ -93,26 +98,8 @@ class FolderVideoPlayer:
 
         self.player.setSource(QUrl.fromLocalFile(str(video_path)))
 
-        # 根据文件名尝试解析 index 并显示对应 prompt
-        stem = video_path.stem
-        prompt_text = ""
-        try:
-            idx = int(stem)
-            prompt_text = self.prompts.get(idx, "")
-        except ValueError:
-            # 也尝试例如 video_064 这种形式
-            parts = [p for p in stem.split("_") if p.isdigit()]
-            if parts:
-                try:
-                    idx = int(parts[-1])
-                    prompt_text = self.prompts.get(idx, "")
-                except ValueError:
-                    prompt_text = ""
-
-        if prompt_text:
-            self.info_label.setText(f"{self.folder.name} — {file_name}\n{prompt_text}")
-        else:
-            self.info_label.setText(f"{self.folder.name} — {file_name}")
+        # 简化展示信息：只显示文件夹名和文件名
+        self.info_label.setText(f"{self.folder.name} — {file_name}")
         return True
 
     def set_position(self, position_ms: int) -> None:
@@ -151,6 +138,8 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
 
         main_layout = QVBoxLayout(central)
+        main_layout.setContentsMargins(6, 6, 6, 6)
+        main_layout.setSpacing(6)
 
         # 顶部：文件夹列表 + 控制区
         top_layout = QHBoxLayout()
@@ -224,9 +213,19 @@ class MainWindow(QMainWindow):
 
         control_layout.addStretch(1)
 
-        # 中间：多路视频区域
+        # 中间：多路视频区域（可滚动）
         self.video_grid = QGridLayout()
-        main_layout.addLayout(self.video_grid, 5)
+        self.video_grid.setContentsMargins(0, 0, 0, 0)
+        self.video_grid.setHorizontalSpacing(4)
+        self.video_grid.setVerticalSpacing(4)
+
+        self.video_container = QWidget(self)
+        self.video_container.setLayout(self.video_grid)
+
+        self.scroll_area = QScrollArea(self)
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setWidget(self.video_container)
+        main_layout.addWidget(self.scroll_area, 5)
 
         # 底部：播放控制 + 进度条
         bottom_layout = QHBoxLayout()
@@ -292,15 +291,18 @@ class MainWindow(QMainWindow):
         item = QListWidgetItem(str(folder))
         self.folder_list.addItem(item)
 
-        # 将视频控件加到网格布局
-        row = (len(self.folder_players) - 1) // 2
-        col = (len(self.folder_players) - 1) % 2
+        # 将视频控件加到网格布局：一行最多两个，超出换行
+        index = len(self.folder_players) - 1
+        cols = 2
+        row = index // cols
+        col = index % cols
 
         container = QWidget(self)
         vbox = QVBoxLayout(container)
         vbox.setContentsMargins(0, 0, 0, 0)
         vbox.addWidget(player.video_widget)
         vbox.addWidget(player.info_label)
+        container.setMinimumHeight(220)
 
         self.video_grid.addWidget(container, row, col)
 
